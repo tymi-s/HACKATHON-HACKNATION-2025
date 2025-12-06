@@ -1,118 +1,101 @@
 #!/usr/bin/env python3
 """
-RTG Contraband Detection - MEMORY OPTIMIZED
-Fix for large images + Windows symlink patch
+RTG Anomaly Detector - GPU / CUDA VERSION
+Wersja skonfigurowana do treningu na karcie graficznej.
 """
-
 import os
-import sys
-from pathlib import Path
 import warnings
+import torch
+from pathlib import Path
 
-# --- KONFIGURACJA ---
+# --- KONFIGURACJA ŚRODOWISKA ---
 os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
+# Kluczowe ustawienie dla GPU na Windows (zapobiega fragmentacji pamięci VRAM)
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 warnings.filterwarnings("ignore")
 
-# --- MONKEY PATCH ---
+# --- NAPRAWA WINDOWS (Monkey Patch) ---
 import anomalib.utils.path
+anomalib.utils.path.create_versioned_dir = lambda p: Path(p).mkdir(parents=True, exist_ok=True) or Path(p)
 
-def fake_create_versioned_dir(root_dir):
-    root_dir = Path(root_dir)
-    root_dir.mkdir(parents=True, exist_ok=True)
-    return root_dir
-
-print("🔧 Applying Windows symlink patch...")
-anomalib.utils.path.create_versioned_dir = fake_create_versioned_dir
-print("✅ Patch applied!")
-
-# --- IMPORTY ---
 from anomalib.data import Folder
 from anomalib.models import Padim
 from anomalib.engine import Engine
 
-
-class RTGAnomalyDetector:
-    def __init__(self, data_root: str, backbone: str = "resnet18"):
-        self.data_root = Path(data_root)
-        
-        # ZMIANA: resnet18 zamiast wide_resnet50_2 (mniej pamięci!)
-        # ZMIANA: n_features=100 zamiast 550 (znacznie mniej RAM!)
-        self.model = Padim(
-            backbone=backbone,
-            layers=["layer1", "layer2", "layer3"],
-            n_features=100,  # KLUCZOWE: 100 zamiast 550!
-        )
-        
-        self.engine = None
-        
-    def prepare_dataset(self):
-        print(f"📁 Loading data from: {self.data_root}")
-        
-        self.datamodule = Folder(
-            name="rtg_vehicles",
-            root=self.data_root,
-            normal_dir="normal/czyste",
-            abnormal_dir="abnormal/brudne",
-        )
-        
-        self.datamodule.setup()
-        
-        train_size = len(self.datamodule.train_dataloader().dataset)
-        test_size = len(self.datamodule.test_dataloader().dataset)
-        
-        print(f"✅ Dataset prepared:")
-        print(f"   Training: {train_size} | Test: {test_size}")
-        
-        return self.datamodule
-    
-    def train(self, max_epochs: int = 1):
-        print(f"\n🚀 Training PADIM (memory optimized)...")
-        
-        results_dir = Path("./final_results")
-        
-        self.engine = Engine(
-            accelerator="cpu",  # Force CPU
-            devices=1,
-            max_epochs=max_epochs,
-            default_root_dir=str(results_dir),
-        )
-        
-        print("⏳ Training...")
-        self.engine.fit(model=self.model, datamodule=self.datamodule)
-        print("✅ Done!")
-        
-    def test(self):
-        print("\n🧪 Testing...")
-        results = self.engine.test(model=self.model, datamodule=self.datamodule)
-        
-        print("\n📊 RESULTS:")
-        if results and len(results) > 0:
-            for key, value in results[0].items():
-                if isinstance(value, (int, float)):
-                    print(f"   {key}: {value:.4f}")
-        
-        return results
-
-
 def main():
-    DATA_ROOT = "./processed_data"
-    
-    print("=" * 70)
-    print("RTG ANOMALY DETECTOR - MEMORY OPTIMIZED")
-    print("=" * 70)
-    print("\n⚠️  Using ResNet18 + reduced features for memory efficiency")
-    print("    Your images are HUGE (2164x1250), need to optimize!\n")
-    
-    if not Path(DATA_ROOT).exists():
-        print("❌ ERROR: Data not found")
+    print("🚀 RTG DETECTOR - GPU/CUDA MODE")
+    print("==================================================")
+
+    # 1. SPRAWDZENIE DOSTĘPNOŚCI CUDA
+    if not torch.cuda.is_available():
+        print("❌ UWAGA: PyTorch nie wykrył karty NVIDIA!")
+        print("   Skrypt uruchomi się na CPU, co będzie wolne.")
+        print("   Upewnij się, że zainstalowałeś PyTorch z obsługą CUDA.")
+        accelerator_type = "cpu"
+    else:
+        gpu_name = torch.cuda.get_device_name(0)
+        print(f"✅ Wykryto GPU: {gpu_name}")
+        accelerator_type = "gpu"
+
+    # 2. Sprawdzenie danych
+    if not Path("processed_data").exists():
+        print("❌ BŁĄD: Brak folderu processed_data. Uruchom preprocess_data.py!")
         return
 
-    detector = RTGAnomalyDetector(data_root=DATA_ROOT, backbone="resnet18")
-    detector.prepare_dataset()
-    detector.train(max_epochs=1)
-    detector.test()
-    
-    print("\n✅ DONE!")
+    # 3. Konfiguracja Datasetu
+    datamodule = Folder(
+        name="rtg_gpu",
+        root="processed_data",
+        normal_dir="Good",
+        abnormal_dir="Bad",
+        train_batch_size=8,  # Na GPU możemy dać większy batch (np. 8 lub 16)
+        num_workers=2
+    )
+    datamodule.setup()
+
+    # 4. MODEL
+    # Używamy ResNet18 - jest super szybki na GPU i zajmuje mało VRAM.
+    # Jeśli masz mocną kartę (np. RTX 3060 lub lepszą z 8GB+ VRAM), 
+    # możesz zmienić na "wide_resnet50_2".
+    print(f"🧠 Inicjalizacja modelu: Padim (ResNet18)...")
+    model = Padim(
+        backbone="resnet18", 
+        layers=["layer1", "layer2", "layer3"]
+    )
+
+    # 5. SILNIK TRENINGOWY (Tu jest zmiana na GPU)
+    engine = Engine(
+        max_epochs=3,               # Na GPU 3 epoki przelecą błyskawicznie
+        default_root_dir="final_results_gpu",
+        accelerator=accelerator_type, # <--- TU JEST KLUCZOWA ZMIANA ("gpu")
+        devices=1,                  # Użyj 1 karty graficznej
+    )
+
+    # 6. Start
+    print("\n⏳ Rozpoczynam trening...")
+    try:
+        engine.fit(model=model, datamodule=datamodule)
+        print("✅ Trening zakończony.")
+        
+        print("\n🧪 Testowanie dokładności...")
+        results = engine.test(model=model, datamodule=datamodule)
+        
+        if results:
+            metrics = results[0]
+            auroc = 0.0
+            for k, v in metrics.items():
+                if "AUROC" in k and isinstance(v, (int, float)):
+                    auroc = v
+            
+            print("\n" + "="*40)
+            print(f"🎯 WYNIK KOŃCOWY (AUROC): {auroc:.4f}")
+            print("="*40)
+
+    except torch.cuda.OutOfMemoryError:
+        print("\n❌ BŁĄD: Brak pamięci VRAM na karcie graficznej.")
+        print("   Rozwiązanie: Zmniejsz 'train_batch_size' w kodzie do 2 lub 1.")
+    except Exception as e:
+        print(f"❌ Błąd: {e}")
 
 if __name__ == "__main__":
     main()

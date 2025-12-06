@@ -1,212 +1,143 @@
 #!/usr/bin/env python3
 """
-Data Preprocessing for RTG Images
-Handles dual-channel images: grayscale + density (blue) images
+RTG Preprocessor - UNIVERSAL FULL AUGMENTATION
+Przetwarza CAŁY zbiór danych (NAUKA), tworząc warianty dla każdego zdjęcia.
 """
 
 import os
-from pathlib import Path
-import numpy as np
-from PIL import Image
+import shutil
 import cv2
+import numpy as np
+from pathlib import Path
 from tqdm import tqdm
 
-
-class RTGPreprocessor:
-    """
-    Preprocesses RTG images for anomaly detection.
-    
-    Combines grayscale and density images into multi-channel format.
-    """
-    
-    def __init__(self, source_dir: str, output_dir: str, image_size: tuple = (512, 512)):
-        """
-        Args:
-            source_dir: Directory with raw data (czyste, brudne folders)
-            output_dir: Where to save preprocessed images
-            image_size: Target size for images
-        """
+class RTGAugmentor:
+    def __init__(self, source_dir: str, output_dir: str, image_size: tuple = (256, 256)):
         self.source_dir = Path(source_dir)
         self.output_dir = Path(output_dir)
         self.image_size = image_size
         
     def process_all(self):
-        """Process all images in czyste and brudne folders"""
+        # 1. Konfiguracja ścieżek
+        print(f"🚀 ROZPOCZYNAM PEŁNE PRZETWARZANIE DANYCH")
+        print(f"   Źródło: {self.source_dir}")
+        
+        if not self.source_dir.exists():
+            print(f"❌ BŁĄD: Nie znaleziono folderu źródłowego: {self.source_dir}")
+            return
+
+        # 2. Czyszczenie starego folderu processed_data (zaczynamy od zera)
+        if self.output_dir.exists():
+            print("🧹 Czyszczenie starego folderu processed_data...")
+            try:
+                shutil.rmtree(self.output_dir)
+            except:
+                print("⚠️ Nie udało się usunąć folderu automatycznie. Usuń go ręcznie jeśli wystąpi błąd.")
+        
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+
+        # 3. Przetwarzanie obu kategorii
         for category in ['czyste', 'brudne']:
-            print(f"\n📂 Processing {category} images...")
             self.process_category(category)
             
     def process_category(self, category: str):
-        """
-        Process images in a category (czyste or brudne).
+        target_name = "Good" if category == "czyste" else "Bad"
+        source_path = self.source_dir / category
+        output_path = self.output_dir / target_name
         
-        Expected input structure:
-        source_dir/czyste/
-        ├── IMG_001/
-        │   ├── IMG_001.bmp          # Grayscale RTG
-        │   └── IMG_001_czarno.bmp   # Density (blue) image
-        └── IMG_002/
-            └── ...
-        """
-        category_path = self.source_dir / category
-        output_category = self.output_dir / category
-        output_category.mkdir(parents=True, exist_ok=True)
+        if not source_path.exists():
+            print(f"⚠️ OSTRZEŻENIE: Brak folderu {category} w {self.source_dir}")
+            return
+
+        output_path.mkdir(parents=True, exist_ok=True)
         
-        # Get all subdirectories
-        subdirs = [d for d in category_path.iterdir() if d.is_dir()]
+        # Szukamy podfolderów (struktura oryginalna)
+        subdirs = [d for d in source_path.iterdir() if d.is_dir()]
         
-        for subdir in tqdm(subdirs, desc=f"Processing {category}"):
-            # Find the two image files
+        print(f"\n📂 Przetwarzanie kategorii '{category}' -> '{target_name}'...")
+        print(f"   Znaleziono {len(subdirs)} obiektów. Generowanie wariantów...")
+        
+        count = 0
+        for subdir in tqdm(subdirs):
             images = list(subdir.glob("*.bmp"))
             
-            # Separate grayscale and density images
-            grayscale_img = None
-            density_img = None
-            
-            for img_path in images:
-                if "czarno" in img_path.name.lower():
-                    density_img = img_path
+            # Logika parowania (szukamy zwykłego + gęstości)
+            gray_img = None
+            dens_img = None
+            for img in images:
+                if "czarno" in img.name.lower() or "hi" in img.name.lower():
+                    dens_img = img
                 else:
-                    grayscale_img = img_path
+                    gray_img = img
             
-            if grayscale_img is None or density_img is None:
-                print(f"⚠️  Skipping {subdir.name} - missing images")
-                continue
-            
-            # Process and combine images
-            self.process_image_pair(
-                grayscale_path=grayscale_img,
-                density_path=density_img,
-                output_path=output_category / f"{subdir.name}.png",
-            )
-    
-    def process_image_pair(self, grayscale_path: Path, density_path: Path, output_path: Path):
-        """
-        Process a pair of images (grayscale + density).
-        
-        Strategies:
-        1. Stack as 2-channel image
-        2. Combine into RGB (grayscale, density, weighted_avg)
-        3. Side-by-side concatenation
-        """
-        # Load images
-        gray = cv2.imread(str(grayscale_path), cv2.IMREAD_GRAYSCALE)
-        density = cv2.imread(str(density_path), cv2.IMREAD_GRAYSCALE)
-        
-        # Resize to target size
-        gray = cv2.resize(gray, self.image_size)
-        density = cv2.resize(density, self.image_size)
-        
-        # Strategy 1: Stack as 2-channel (save as 3-channel RGB for compatibility)
-        # We use grayscale in R channel, density in G channel, and combination in B
-        combined = np.stack([
-            gray,                           # R channel: grayscale
-            density,                        # G channel: density
-            (gray * 0.7 + density * 0.3).astype(np.uint8)  # B channel: weighted combination
-        ], axis=-1)
-        
-        # Save
-        cv2.imwrite(str(output_path), combined)
-    
-    def create_anomalib_structure(self):
-        """
-        Create proper Anomalib folder structure:
-        
-        output_dir/
-        ├── normal/
-        │   └── czyste/
-        │       ├── IMG_001.png
-        │       └── IMG_002.png
-        └── abnormal/
-            └── brudne/
-                ├── IMG_003.png
-                └── IMG_004.png
-        """
-        # Create structure
-        normal_dir = self.output_dir / "normal" / "czyste"
-        abnormal_dir = self.output_dir / "abnormal" / "brudne"
-        
-        normal_dir.mkdir(parents=True, exist_ok=True)
-        abnormal_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Move processed images
-        if (self.output_dir / "czyste").exists():
-            for img in (self.output_dir / "czyste").glob("*.png"):
-                img.rename(normal_dir / img.name)
-            (self.output_dir / "czyste").rmdir()
-        
-        if (self.output_dir / "brudne").exists():
-            for img in (self.output_dir / "brudne").glob("*.png"):
-                img.rename(abnormal_dir / img.name)
-            (self.output_dir / "brudne").rmdir()
-        
-        print(f"\n✅ Created Anomalib structure in {self.output_dir}")
+            # Jeśli mamy parę, tworzymy hybrydę i warianty
+            if gray_img and dens_img:
+                base_image = self.create_hybrid(gray_img, dens_img)
+                if base_image is None: continue
+                
+                base_name = subdir.name
+                
+                # Zapisz oryginał
+                cv2.imwrite(str(output_path / f"{base_name}_orig.png"), base_image)
+                count += 1
+                
+                # --- AUGMENTACJA (Tworzymy dodatkowe dane) ---
+                
+                # 1. Odbicie lustrzane
+                cv2.imwrite(str(output_path / f"{base_name}_flip.png"), cv2.flip(base_image, 1))
+                count += 1
+                
+                # 2. Jasność (+20%)
+                cv2.imwrite(str(output_path / f"{base_name}_bright.png"), self.adjust_gamma(base_image, 1.2))
+                count += 1
+                
+                # 3. Przyciemnienie (-20%)
+                cv2.imwrite(str(output_path / f"{base_name}_dark.png"), self.adjust_gamma(base_image, 0.8))
+                count += 1
 
+                # 4. Obrót lekki (+3 stopnie)
+                cv2.imwrite(str(output_path / f"{base_name}_rotP3.png"), self.rotate_image(base_image, 3))
+                count += 1
 
-def explore_data(data_dir: str):
-    """
-    Explore the raw data structure and show statistics.
-    """
-    data_path = Path(data_dir)
-    
-    print("\n" + "=" * 70)
-    print("DATA EXPLORATION")
-    print("=" * 70)
-    
-    for category in ['czyste', 'brudne']:
-        category_path = data_path / category
-        if not category_path.exists():
-            print(f"\n⚠️  {category} directory not found!")
-            continue
-            
-        subdirs = [d for d in category_path.iterdir() if d.is_dir()]
-        print(f"\n📊 {category.upper()}:")
-        print(f"   Total subdirectories: {len(subdirs)}")
-        
-        # Sample first directory to understand structure
-        if subdirs:
-            sample = subdirs[0]
-            images = list(sample.glob("*.bmp"))
-            print(f"   Sample directory: {sample.name}")
-            print(f"   Images per directory: {len(images)}")
-            
-            # Check image sizes
-            if images:
-                img = Image.open(images[0])
-                print(f"   Image size: {img.size} (WxH)")
-                print(f"   Image mode: {img.mode}")
-                file_size_mb = images[0].stat().st_size / (1024 * 1024)
-                print(f"   File size: {file_size_mb:.2f} MB")
+                # 5. Zoom (10%)
+                cv2.imwrite(str(output_path / f"{base_name}_zoom.png"), self.zoom_image(base_image, 1.1))
+                count += 1
 
+        print(f"✅ Zakończono {category}. Łącznie plików w folderze: {count}")
+
+    # --- FUNKCJE POMOCNICZE (Te same co wcześniej) ---
+    def create_hybrid(self, gray_path, dens_path):
+        img_gray = cv2.imread(str(gray_path), cv2.IMREAD_GRAYSCALE)
+        img_dens = cv2.imread(str(dens_path), cv2.IMREAD_GRAYSCALE)
+        if img_gray is None or img_dens is None: return None
+        img_gray = cv2.resize(img_gray, self.image_size)
+        img_dens = cv2.resize(img_dens, self.image_size)
+        return np.stack([img_gray, img_dens, cv2.addWeighted(img_gray, 0.5, img_dens, 0.5, 0)], axis=-1)
+
+    def rotate_image(self, image, angle):
+        h, w = image.shape[:2]
+        M = cv2.getRotationMatrix2D((w//2, h//2), angle, 1.0)
+        return cv2.warpAffine(image, M, (w, h), borderMode=cv2.BORDER_REFLECT)
+
+    def adjust_gamma(self, image, gamma=1.0):
+        invGamma = 1.0 / gamma
+        table = np.array([((i / 255.0) ** invGamma) * 255 for i in np.arange(0, 256)]).astype("uint8")
+        return cv2.LUT(image, table)
+
+    def zoom_image(self, image, zoom_factor=1.1):
+        h, w = image.shape[:2]
+        new_h, new_w = int(h / zoom_factor), int(w / zoom_factor)
+        top = (h - new_h) // 2
+        left = (w - new_w) // 2
+        cropped = image[top:top+new_h, left:left+new_w]
+        return cv2.resize(cropped, (w, h))
 
 if __name__ == "__main__":
-    # Configuration
-    SOURCE_DIR = "../NAUKA"          # <-- ZMIEŃ NA SWOJĄ ŚCIEŻKĘ!
-    OUTPUT_DIR = "./processed_data"  # Zostaje tak
-    IMAGE_SIZE = (512, 512)          # Możesz zmienić na (256, 256) jeśli za wolno
+    # PEŁNA ŚCIEŻKA DO DANYCH
+    SOURCE = "C:/Users/michm/OneDrive/Pulpit/NAUKA"
+    OUTPUT = "processed_data"
     
-    print("=" * 70)
-    print("RTG DATA PREPROCESSING")
-    print("=" * 70)
-    
-    # First, explore the data
-    explore_data(SOURCE_DIR)
-    
-    # Create preprocessor
-    preprocessor = RTGPreprocessor(
-        source_dir=SOURCE_DIR,
-        output_dir=OUTPUT_DIR,
-        image_size=IMAGE_SIZE,
-    )
-    
-    # Process all images
-    print("\n🔄 Starting preprocessing...")
-    preprocessor.process_all()
-    
-    # Create Anomalib-compatible structure
-    preprocessor.create_anomalib_structure()
-    
-    print("\n✅ Preprocessing complete!")
-    print(f"   Processed images saved to: {OUTPUT_DIR}")
-    print("\nNext step:")
-    print(f"   python rtg_anomaly_detector.py")
+    # 256x256 to optymalny balans. Jeśli masz bardzo mocny PC, możesz dać 512.
+    augmentor = RTGAugmentor(SOURCE, OUTPUT, (256, 256))
+    augmentor.process_all()
+    print("\n✅ GOTOWE! Teraz uruchom rtg_anomaly_detector.py")
